@@ -42,7 +42,9 @@ CORS(app,
                  "https://stockmarketai.netlify.app",
                  "http://localhost:3000",
                  "https://www.stockmarketai.netlify.app",
-                 "http://stockmarketai.netlify.app"
+                 "http://stockmarketai.netlify.app",
+                 "http://localhost:5173",  # Vite dev server default port
+                 "*"  # Allow all origins during development
              ],
              "methods": ["GET", "POST", "OPTIONS", "HEAD"],
              "allow_headers": [
