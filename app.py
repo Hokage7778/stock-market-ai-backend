@@ -15,6 +15,7 @@ from io import BytesIO
 import numpy as np
 import logging
 import traceback
+import yfinance as yf
 
 # Configure logging
 logging.basicConfig(
@@ -57,356 +58,275 @@ CORS(app,
          }
      })
 
-# API Keys
-ALPHA_VANTAGE_API_KEY = os.environ.get("ALPHA_VANTAGE_API_KEY")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+# Get API keys from environment variables or use fallback for development
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 
-# Validate API keys
-if not ALPHA_VANTAGE_API_KEY:
-    logger.error("Alpha Vantage API key not found in environment variables")
-if not GEMINI_API_KEY:
-    logger.error("Gemini API key not found in environment variables")
-
-# Initialize Google Gemini client
-genai.configure(api_key=GEMINI_API_KEY)
-
-def fetch_stock_data(symbol, interval='daily', outputsize='compact'):
-    """Fetch stock data from Alpha Vantage API"""
-    if not ALPHA_VANTAGE_API_KEY:
-        return None, "Alpha Vantage API key not configured"
-    
-    function = 'TIME_SERIES_DAILY' if interval == 'daily' else 'TIME_SERIES_INTRADAY'
-    
-    url = f'https://www.alphavantage.co/query?function={function}&symbol={symbol}&outputsize={outputsize}&apikey={ALPHA_VANTAGE_API_KEY}'
-    if interval != 'daily':
-        url += f'&interval={interval}'
-    
-    logger.info(f"Fetching data for {symbol} from Alpha Vantage")
-    
-    try:
-        response = requests.get(url, timeout=10)  # Add timeout
-        response.raise_for_status()  # Raise an exception for bad status codes
-        data = response.json()
-        
-        # Print the response for debugging
-        logger.debug(f"API Response keys: {data.keys()}")
-        
-        # Check for API rate limit message
-        if 'Information' in data and 'rate limit' in data['Information'].lower():
-            logger.warning(f"Alpha Vantage rate limit reached: {data['Information']}")
-            return None, {
-                'error': 'API rate limit reached. Please try again later or contact support for premium access.',
-                'details': data['Information']
-            }
-        
-        if 'Error Message' in data:
-            logger.error(f"Alpha Vantage error for {symbol}: {data['Error Message']}")
-            return None, {'error': data['Error Message']}
-        
-        if 'Note' in data:
-            logger.warning(f"Alpha Vantage note for {symbol}: {data['Note']}")
-            return None, {'error': data['Note']}
-        
-        if 'Time Series (Daily)' not in data:
-            logger.error(f"Unexpected API response for {symbol}: {data}")
-            return None, {'error': 'Invalid API response format'}
-        
-        # Extract time series data
-        time_series_key = f'Time Series ({interval})' if interval != 'daily' else 'Time Series (Daily)'
-        
-        if time_series_key not in data:
-            logger.error(f"No time series data found for {symbol}. Available keys: {data.keys()}")
-            return None, "No time series data found"
-        
-        time_series = data[time_series_key]
-        
-        # Convert to DataFrame
-        df = pd.DataFrame(time_series).T
-        df.index = pd.to_datetime(df.index)
-        df = df.sort_index()
-        
-        # Rename columns
-        df.columns = [col.split('. ')[1] for col in df.columns]
-        
-        # Convert to numeric
-        for col in df.columns:
-            df[col] = pd.to_numeric(df[col])
-        
-        logger.info(f"Successfully fetched data for {symbol}. Shape: {df.shape}")
-        return df, None
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Network error fetching data for {symbol}: {e}")
-        return None, f"Network error: {str(e)}"
-    except Exception as e:
-        logger.error(f"Exception in fetch_stock_data for {symbol}: {e}")
-        logger.error(traceback.format_exc())
-        return None, f"Error fetching stock data: {str(e)}"
-
-def create_candlestick_chart(df):
-    """Create a candlestick chart using Matplotlib"""
-    try:
-        # Get the most recent 30 days of data
-        df_recent = df.tail(30)
-        
-        # Create figure and axis with Agg backend
-        plt.switch_backend('Agg')
-        fig, ax = plt.subplots(figsize=(12, 6))
-        
-        # Format dates on x-axis
-        ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
-        plt.xticks(rotation=45)
-        
-        # Calculate width of candlestick elements
-        width = 0.6
-        width2 = 0.1
-        
-        # Define up and down days
-        up = df_recent[df_recent.close >= df_recent.open]
-        down = df_recent[df_recent.close < df_recent.open]
-        
-        # Plot up days
-        ax.bar(up.index, up.close-up.open, width, bottom=up.open, color='green')
-        ax.bar(up.index, up.high-up.close, width2, bottom=up.close, color='green')
-        ax.bar(up.index, up.low-up.open, width2, bottom=up.open, color='green')
-        
-        # Plot down days
-        ax.bar(down.index, down.close-down.open, width, bottom=down.open, color='red')
-        ax.bar(down.index, down.high-down.open, width2, bottom=down.open, color='red')
-        ax.bar(down.index, down.low-down.close, width2, bottom=down.close, color='red')
-        
-        # Add 20-day moving average if available
-        if 'MA20' in df_recent.columns and not df_recent['MA20'].isna().all():
-            ax.plot(df_recent.index, df_recent['MA20'], color='blue', linewidth=1.5, label='20-day MA')
-        
-        # Add 50-day moving average if available
-        if 'MA50' in df_recent.columns and not df_recent['MA50'].isna().all():
-            ax.plot(df_recent.index, df_recent['MA50'], color='orange', linewidth=1.5, label='50-day MA')
-        
-        # Add legend if we have moving averages
-        if ('MA20' in df_recent.columns and not df_recent['MA20'].isna().all()) or \
-           ('MA50' in df_recent.columns and not df_recent['MA50'].isna().all()):
-            ax.legend()
-        
-        # Set title and labels
-        ax.set_title(f'Candlestick Chart (Last 30 Days)')
-        ax.set_xlabel('Date')
-        ax.set_ylabel('Price')
-        
-        # Adjust layout
-        plt.tight_layout()
-        
-        # Save to BytesIO object
-        buffer = BytesIO()
-        plt.savefig(buffer, format='png', bbox_inches='tight')
-        buffer.seek(0)
-        
-        # Encode as base64
-        image_png = buffer.getvalue()
-        buffer.close()
-        encoded_image = base64.b64encode(image_png).decode('utf-8')
-        
-        # Close the figure to free memory
-        plt.close(fig)
-        
-        return encoded_image
-    except Exception as e:
-        logger.error(f"Error generating chart: {e}")
-        logger.error(traceback.format_exc())
-        return ""
-
-def analyze_stock_with_gemini(stock_symbol, chart_base64, stock_data):
-    """Analyze stock using Google Gemini"""
-    
-    # Calculate some basic technical indicators
-    df = stock_data.copy()
-    
-    # Calculate 20-day and 50-day moving averages
-    df['MA20'] = df['close'].rolling(window=20).mean()
-    df['MA50'] = df['close'].rolling(window=50).mean()
-    
-    # Calculate RSI (Relative Strength Index)
-    delta = df['close'].diff()
-    gain = delta.where(delta > 0, 0).rolling(window=14).mean()
-    loss = -delta.where(delta < 0, 0).rolling(window=14).mean()
-    rs = gain / loss
-    df['RSI'] = 100 - (100 / (1 + rs))
-    
-    # Calculate MACD (Moving Average Convergence Divergence)
-    df['EMA12'] = df['close'].ewm(span=12, adjust=False).mean()
-    df['EMA26'] = df['close'].ewm(span=26, adjust=False).mean()
-    df['MACD'] = df['EMA12'] - df['EMA26']
-    df['Signal_Line'] = df['MACD'].ewm(span=9, adjust=False).mean()
-    
-    # Get the latest data
-    latest_data = df.iloc[-1].to_dict()
-    
-    # Get the last 10 days of price data for trend analysis
-    recent_prices = df.tail(10)['close'].tolist()
-    recent_dates = [date.strftime('%Y-%m-%d') for date in df.tail(10).index.tolist()]
-    
-    # Format the technical indicators with proper handling of NaN values
-    rsi_value = latest_data.get('RSI')
-    rsi_formatted = f"{rsi_value:.2f}" if pd.notna(rsi_value) else "N/A"
-    
-    macd_value = latest_data.get('MACD')
-    macd_formatted = f"{macd_value:.4f}" if pd.notna(macd_value) else "N/A"
-    
-    signal_value = latest_data.get('Signal_Line')
-    signal_formatted = f"{signal_value:.4f}" if pd.notna(signal_value) else "N/A"
-    
-    ma20_value = latest_data.get('MA20')
-    ma20_formatted = f"${ma20_value:.2f}" if pd.notna(ma20_value) else "N/A"
-    
-    ma50_value = latest_data.get('MA50')
-    ma50_formatted = f"${ma50_value:.2f}" if pd.notna(ma50_value) else "N/A"
-    
-    # Prepare the prompt for Gemini
-    prompt = f"""
-    You are a stock market analyst. Analyze the following stock data for {stock_symbol} and provide investment recommendations.
-    
-    Recent Price Data (last 10 trading days):
-    {', '.join([f"{date}: ${price:.2f}" for date, price in zip(recent_dates, recent_prices)])}
-    
-    Latest Technical Indicators:
-    - Close Price: ${latest_data['close']:.2f}
-    - 20-Day Moving Average: {ma20_formatted}
-    - 50-Day Moving Average: {ma50_formatted}
-    - RSI (14-day): {rsi_formatted}
-    - MACD: {macd_formatted}
-    - MACD Signal Line: {signal_formatted}
-    """
-    
-    # Create a model instance
-    model = genai.GenerativeModel(
-        model_name="gemini-1.5-flash",
-        generation_config={
-            "temperature": 0.7,
-            "top_p": 0.95,
-            "top_k": 40,
-            "max_output_tokens": 8192,
-        }
-    )
-    
-    try:
-        # If we have a chart, include it in the analysis
-        if chart_base64 and len(chart_base64) > 0:
-            # Update prompt to mention the chart
-            prompt += """
-            
-            Based on the candlestick chart and technical indicators:
-            1. Analyze the current price action and trend
-            2. Interpret the technical indicators (MA, RSI, MACD)
-            3. Identify potential support and resistance levels
-            4. Provide a short-term outlook (1-2 weeks)
-            5. Provide a medium-term outlook (1-3 months)
-            6. Give a clear buy, sell, or hold recommendation with reasoning
-            
-            Format your response in a clear, structured manner with headings for each section.
-            """
-            
-            # Decode the base64 image
-            image_data = base64.b64decode(chart_base64)
-            
-            # Generate content with text and image
-            response = model.generate_content(
-                contents=[
-                    prompt,
-                    {"mime_type": "image/png", "data": image_data}
-                ]
-            )
-        else:
-            # Add instructions without mentioning the chart
-            prompt += """
-            
-            Based on the price data and technical indicators:
-            1. Analyze the current price action and trend
-            2. Interpret the technical indicators (MA, RSI, MACD)
-            3. Identify potential support and resistance levels
-            4. Provide a short-term outlook (1-2 weeks)
-            5. Provide a medium-term outlook (1-3 months)
-            6. Give a clear buy, sell, or hold recommendation with reasoning
-            
-            Format your response in a clear, structured manner with headings for each section.
-            """
-            
-            # Generate content with text only
-            response = model.generate_content(prompt)
-        
-        return response.text
-    except Exception as e:
-        print(f"Error in Gemini analysis: {e}")
-        return f"Error analyzing stock: {e}"
-
-@app.route('/api/stock-data', methods=['GET'])
-def get_stock_data():
-    try:
-        symbol = request.args.get('symbol', '').upper()
-        logger.debug(f"Received request for symbol: {symbol}")
-        
-        if not symbol:
-            logger.error("No symbol provided")
-            return jsonify({'error': 'Symbol is required'}), 400
-            
-        logger.debug("Fetching stock data from Alpha Vantage")
-        df, error = fetch_stock_data(symbol)
-        
-        if error:
-            logger.error(f"Error fetching data for {symbol}: {error}")
-            return jsonify(error), 500
-            
-        if df is None:
-            logger.error(f"No data returned for symbol: {symbol}")
-            return jsonify({'error': 'Failed to fetch stock data'}), 500
-            
-        # Convert DataFrame to JSON-serializable format
-        data = {
-            'symbol': symbol,
-            'data': df.reset_index().to_dict(orient='records'),
-            'chart': create_candlestick_chart(df)
-        }
-        
-        logger.debug(f"Successfully processed data for {symbol}")
-        return jsonify(data)
-        
-    except Exception as e:
-        logger.error(f"Error in get_stock_data: {str(e)}", exc_info=True)
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/analyze', methods=['POST'])
-def analyze_stock():
-    try:
-        data = request.json
-        if not data:
-            return jsonify({"error": "No data provided"}), 400
-            
-        symbol = data.get('symbol', 'AAPL')
-        chart_base64 = data.get('chart', '')
-        
-        logger.info(f"Received analysis request for symbol: {symbol}")
-        
-        # Fetch stock data
-        df, error = fetch_stock_data(symbol, outputsize='full')  # Use full data for analysis
-        
-        if error:
-            logger.error(f"Error fetching data for analysis of {symbol}: {error}")
-            return jsonify({"error": error}), 400
-        
-        # Analyze with Gemini
-        analysis = analyze_stock_with_gemini(symbol, chart_base64, df)
-        
-        return jsonify({
-            "symbol": symbol,
-            "analysis": analysis
-        })
-    except Exception as e:
-        logger.error(f"Exception in analyze_stock route: {e}")
-        logger.error(traceback.format_exc())
-        return jsonify({"error": f"Server error: {str(e)}"}), 500
+# Configure Google Gemini API
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+else:
+    logger.error("GEMINI_API_KEY not set in environment variables")
 
 @app.route('/health', methods=['GET'])
 def health_check():
-    return jsonify({"status": "healthy"}), 200
+    """Health check endpoint for monitoring"""
+    return jsonify({"status": "healthy"})
+
+def fetch_stock_data(symbol):
+    """Fetch stock data using yfinance"""
+    try:
+        # Get historical data for last 100 days
+        ticker = yf.Ticker(symbol)
+        df = ticker.history(period="3mo")
+        
+        if df.empty:
+            logger.error(f"No data returned from yfinance for {symbol}")
+            return None, {'error': f"No data available for symbol {symbol}"}
+        
+        # Rename columns for consistency with the rest of the code
+        df = df.rename(columns={
+            'Open': 'open',
+            'High': 'high',
+            'Low': 'low',
+            'Close': 'close',
+            'Volume': 'volume'
+        })
+        
+        # Convert index to datetime if it's not already
+        df.index = pd.to_datetime(df.index)
+        
+        # Sort data by date descending (newest first)
+        df = df.sort_index(ascending=False)
+        
+        # Keep only the columns we need
+        df = df[['open', 'high', 'low', 'close', 'volume']]
+        
+        # Limit to 100 days
+        df = df.head(100)
+        
+        logger.info(f"Successfully fetched data for {symbol}. Shape: {df.shape}")
+        return df, None
+        
+    except Exception as e:
+        logger.error(f"Error fetching data for {symbol}: {str(e)}")
+        logger.error(traceback.format_exc())
+        return None, {'error': f"Error fetching data for {symbol}: {str(e)}"}
+
+def create_candlestick_chart(df, symbol):
+    """Create a candlestick chart for stock data"""
+    try:
+        # Reset index to make date a column
+        df = df.reset_index()
+        
+        # Convert date column to datetime if not already
+        df['Date'] = pd.to_datetime(df['Date'])
+        
+        # Sort by date (ascending for charting)
+        df = df.sort_values('Date')
+        
+        # Create the plot
+        fig, ax = plt.subplots(figsize=(12, 8))
+        
+        # Format the x-axis to show dates nicely
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+        ax.xaxis.set_major_locator(mdates.WeekdayLocator(interval=2))
+        plt.xticks(rotation=45)
+        
+        # Plot the candlesticks
+        width = 0.6
+        width2 = width * 0.8
+        
+        up = df[df.close >= df.open]
+        down = df[df.close < df.open]
+        
+        # Up candles
+        ax.bar(up.Date, up.close - up.open, width, bottom=up.open, color='green')
+        ax.bar(up.Date, up.high - up.close, width2, bottom=up.close, color='green')
+        ax.bar(up.Date, up.open - up.low, width2, bottom=up.low, color='green')
+        
+        # Down candles
+        ax.bar(down.Date, down.close - down.open, width, bottom=down.open, color='red')
+        ax.bar(down.Date, down.high - down.open, width2, bottom=down.open, color='red')
+        ax.bar(down.Date, down.close - down.low, width2, bottom=down.low, color='red')
+        
+        # Set the title and labels
+        ax.set_title(f'{symbol} Stock Price')
+        ax.set_xlabel('Date')
+        ax.set_ylabel('Price')
+        
+        # Tight layout
+        fig.tight_layout()
+        
+        # Convert plot to base64 encoded image
+        buf = BytesIO()
+        fig.savefig(buf, format='png')
+        buf.seek(0)
+        img_str = base64.b64encode(buf.read()).decode('utf-8')
+        plt.close(fig)  # Close the figure to free memory
+        
+        return f"data:image/png;base64,{img_str}"
+        
+    except Exception as e:
+        logger.error(f"Error creating chart: {str(e)}")
+        logger.error(traceback.format_exc())
+        return None
+
+def analyze_stock_with_gemini(symbol, df):
+    """Analyze stock data using Google Gemini"""
+    try:
+        if not GEMINI_API_KEY:
+            return "API key for Google Gemini not configured. Cannot perform analysis."
+        
+        # Sort dataframe by date ascending for calculation
+        df = df.sort_index(ascending=True)
+        
+        # Calculate technical indicators
+        # 1. Moving Averages
+        df['MA20'] = df['close'].rolling(window=20).mean()
+        df['MA50'] = df['close'].rolling(window=50).mean()
+        
+        # 2. RSI
+        delta = df['close'].diff()
+        gain = delta.where(delta > 0, 0)
+        loss = -delta.where(delta < 0, 0)
+        avg_gain = gain.rolling(window=14).mean()
+        avg_loss = loss.rolling(window=14).mean()
+        rs = avg_gain / avg_loss
+        df['RSI'] = 100 - (100 / (1 + rs))
+        
+        # 3. MACD
+        ema12 = df['close'].ewm(span=12, adjust=False).mean()
+        ema26 = df['close'].ewm(span=26, adjust=False).mean()
+        df['MACD'] = ema12 - ema26
+        df['Signal_Line'] = df['MACD'].ewm(span=9, adjust=False).mean()
+        
+        # Get the most recent data point
+        latest_data = df.iloc[-1]
+        
+        # Format the technical indicators, handling NaN values
+        rsi = latest_data['RSI']
+        rsi_formatted = f"{rsi:.2f}" if not pd.isna(rsi) else "N/A"
+        
+        macd = latest_data['MACD']
+        macd_formatted = f"{macd:.4f}" if not pd.isna(macd) else "N/A"
+        
+        signal = latest_data['Signal_Line']
+        signal_formatted = f"{signal:.4f}" if not pd.isna(signal) else "N/A"
+        
+        ma20 = latest_data['MA20']
+        ma20_formatted = f"${ma20:.2f}" if not pd.isna(ma20) else "N/A"
+        
+        ma50 = latest_data['MA50']
+        ma50_formatted = f"${ma50:.2f}" if not pd.isna(ma50) else "N/A"
+        
+        current_price = latest_data['close']
+        current_price_formatted = f"${current_price:.2f}"
+        
+        # Calculate price change
+        first_price = df['close'].iloc[0]
+        price_change = ((current_price - first_price) / first_price) * 100
+        price_change_formatted = f"{price_change:.2f}%"
+        
+        # Prepare a prompt for Gemini
+        prompt = f"""
+        You are a professional stock market analyst. Analyze the stock {symbol} with the following technical indicators:
+        
+        Current Price: {current_price_formatted}
+        Period Price Change: {price_change_formatted}
+        RSI (14-day): {rsi_formatted}
+        MACD: {macd_formatted}
+        Signal Line: {signal_formatted}
+        20-day Moving Average: {ma20_formatted}
+        50-day Moving Average: {ma50_formatted}
+        
+        Provide a comprehensive analysis including:
+        1. Technical analysis based on the indicators above
+        2. Current trend identification (bullish, bearish, or neutral)
+        3. Possible support and resistance levels
+        4. Trading volume significance
+        5. Potential future movement based on these indicators
+        
+        Format your response in a clear, professional manner with sections and bullet points where appropriate.
+        Keep your analysis concise but thorough, with approximately 300-400 words.
+        """
+        
+        # Generate content with Gemini
+        model = genai.GenerativeModel('gemini-pro')
+        response = model.generate_content(prompt)
+        
+        return response.text
+        
+    except Exception as e:
+        logger.error(f"Error analyzing stock: {str(e)}")
+        logger.error(traceback.format_exc())
+        return f"Error performing analysis: {str(e)}"
+
+@app.route('/api/stock-data', methods=['GET'])
+def get_stock_data():
+    """Get stock data for a given symbol"""
+    symbol = request.args.get('symbol', 'AAPL')
+    
+    if not symbol:
+        return jsonify({'error': 'Stock symbol is required'}), 400
+        
+    df, error = fetch_stock_data(symbol)
+    
+    if error:
+        logger.error(f"Error fetching data for {symbol}: {error}")
+        return jsonify(error), 500
+        
+    if df is None:
+        return jsonify({'error': f'No data found for symbol {symbol}'}), 404
+    
+    # Create candlestick chart
+    chart_image = create_candlestick_chart(df, symbol)
+    
+    if not chart_image:
+        return jsonify({'error': 'Failed to create chart'}), 500
+    
+    # Prepare data for response
+    logger.debug(f"Successfully processed data for {symbol}")
+    return jsonify({
+        'symbol': symbol,
+        'chart': chart_image,
+        'data': json.loads(df.head(10).to_json(orient='records', date_format='iso'))
+    })
+
+@app.route('/api/analyze', methods=['POST'])
+def analyze_stock():
+    """Analyze stock data with AI"""
+    try:
+        data = request.json
+        
+        if not data:
+            return jsonify({'error': 'Request body is required'}), 400
+            
+        symbol = data.get('symbol')
+        
+        if not symbol:
+            return jsonify({'error': 'Stock symbol is required'}), 400
+            
+        # Fetch fresh data for analysis
+        df, error = fetch_stock_data(symbol)
+        
+        if error:
+            return jsonify({'error': f'Error fetching data: {error}'}), 500
+            
+        if df is None:
+            return jsonify({'error': f'No data found for symbol {symbol}'}), 404
+            
+        # Perform AI analysis
+        analysis = analyze_stock_with_gemini(symbol, df)
+        
+        return jsonify({
+            'symbol': symbol,
+            'analysis': analysis
+        })
+        
+    except Exception as e:
+        logger.error(f"Error in analyze_stock: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': f'Server error: {str(e)}'}), 500
 
 if __name__ == '__main__':
-    logger.info("Starting Flask server...")
     app.run(debug=True, host='0.0.0.0', port=5005) 
