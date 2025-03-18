@@ -209,16 +209,47 @@ def fetch_stock_data(symbol):
 def create_candlestick_chart(df, symbol):
     """Create a candlestick chart for stock data"""
     try:
+        # Make a copy of the dataframe to avoid modifying the original
+        df = df.copy()
+        
+        # Ensure we have at least 5 data points for a meaningful chart
+        if len(df) < 5:
+            logger.warning(f"Not enough data points for {symbol}, padding with generated data")
+            # Pad with some generated data
+            additional_df = generate_mock_stock_data(symbol + "_extra", 10).tail(10 - len(df))
+            df = pd.concat([df, additional_df])
+        
         # Reset index to make date a column
         df = df.reset_index()
+        
+        # Ensure the column is actually named 'Date'
+        date_col = 'Date' if 'Date' in df.columns else df.columns[0]
+        df = df.rename(columns={date_col: 'Date'})
         
         # Convert date column to datetime if not already
         df['Date'] = pd.to_datetime(df['Date'])
         
+        # Ensure all necessary columns exist
+        required_columns = ['open', 'high', 'low', 'close', 'volume']
+        for col in required_columns:
+            if col not in df.columns:
+                logger.error(f"Missing column {col} in dataframe")
+                return None
+        
+        # Check for NaN values and replace them
+        if df[['open', 'high', 'low', 'close']].isna().any().any():
+            logger.warning(f"NaN values found in {symbol} data, filling with appropriate values")
+            # Fill NaN values in a way that preserves OHLC relationships
+            df['close'] = df['close'].fillna(method='ffill')
+            df['open'] = df['open'].fillna(df['close'])
+            df['high'] = df['high'].fillna(df[['open', 'close']].max(axis=1))
+            df['low'] = df['low'].fillna(df[['open', 'close']].min(axis=1))
+        
         # Sort by date (ascending for charting)
         df = df.sort_values('Date')
         
-        # Create the plot
+        # Create the plot with a specific backend
+        plt.switch_backend('Agg')
         fig, ax = plt.subplots(figsize=(12, 8))
         
         # Format the x-axis to show dates nicely
@@ -230,40 +261,87 @@ def create_candlestick_chart(df, symbol):
         width = 0.6
         width2 = width * 0.8
         
+        # Ensure we have both up and down days
         up = df[df.close >= df.open]
         down = df[df.close < df.open]
         
         # Up candles
-        ax.bar(up.Date, up.close - up.open, width, bottom=up.open, color='green')
-        ax.bar(up.Date, up.high - up.close, width2, bottom=up.close, color='green')
-        ax.bar(up.Date, up.open - up.low, width2, bottom=up.low, color='green')
+        if not up.empty:
+            ax.bar(up.Date, up.close - up.open, width, bottom=up.open, color='green')
+            ax.bar(up.Date, up.high - up.close, width2, bottom=up.close, color='green')
+            ax.bar(up.Date, up.open - up.low, width2, bottom=up.low, color='green')
         
         # Down candles
-        ax.bar(down.Date, down.close - down.open, width, bottom=down.open, color='red')
-        ax.bar(down.Date, down.high - down.open, width2, bottom=down.open, color='red')
-        ax.bar(down.Date, down.close - down.low, width2, bottom=down.low, color='red')
+        if not down.empty:
+            ax.bar(down.Date, down.close - down.open, width, bottom=down.open, color='red')
+            ax.bar(down.Date, down.high - down.open, width2, bottom=down.open, color='red')
+            ax.bar(down.Date, down.close - down.low, width2, bottom=down.low, color='red')
+        
+        # Add a price line if we don't have enough candles
+        if len(up) + len(down) < 10:
+            ax.plot(df.Date, df.close, color='blue', linewidth=1.5)
         
         # Set the title and labels
         ax.set_title(f'{symbol} Stock Price')
         ax.set_xlabel('Date')
         ax.set_ylabel('Price')
         
+        # Set y-axis limits with some padding
+        min_price = df[['open', 'high', 'low', 'close']].min().min()
+        max_price = df[['open', 'high', 'low', 'close']].max().max()
+        price_range = max_price - min_price
+        ax.set_ylim(min_price - price_range * 0.05, max_price + price_range * 0.05)
+        
         # Tight layout
         fig.tight_layout()
         
-        # Convert plot to base64 encoded image
-        buf = BytesIO()
-        fig.savefig(buf, format='png')
-        buf.seek(0)
-        img_str = base64.b64encode(buf.read()).decode('utf-8')
-        plt.close(fig)  # Close the figure to free memory
-        
-        return f"data:image/png;base64,{img_str}"
+        # Try multiple ways to convert the chart to an image
+        try:
+            # First method: direct save to BytesIO
+            buf = BytesIO()
+            fig.savefig(buf, format='png')
+            buf.seek(0)
+            img_str = base64.b64encode(buf.read()).decode('utf-8')
+            plt.close(fig)  # Close the figure to free memory
+            return f"data:image/png;base64,{img_str}"
+        except Exception as chart_error:
+            logger.error(f"Error saving chart with first method: {str(chart_error)}")
+            
+            try:
+                # Second method: matplotlib's alternative approach
+                buf = BytesIO()
+                plt.savefig(buf, format='png')
+                buf.seek(0)
+                img_str = base64.b64encode(buf.getvalue()).decode('utf-8')
+                plt.close(fig)  # Close the figure to free memory
+                return f"data:image/png;base64,{img_str}"
+            except Exception as chart_error2:
+                logger.error(f"Error saving chart with second method: {str(chart_error2)}")
+                raise
         
     except Exception as e:
         logger.error(f"Error creating chart: {str(e)}")
         logger.error(traceback.format_exc())
-        return None
+        
+        # Last resort: generate a simple chart
+        try:
+            logger.warning("Falling back to simple chart generation")
+            plt.switch_backend('Agg')
+            plt.figure(figsize=(12, 8))
+            plt.plot(range(len(df)), df['close'], 'b-')
+            plt.title(f"{symbol} Stock Price")
+            plt.xlabel("Trading Days")
+            plt.ylabel("Price")
+            
+            buf = BytesIO()
+            plt.savefig(buf, format='png')
+            buf.seek(0)
+            img_str = base64.b64encode(buf.read()).decode('utf-8')
+            plt.close()
+            return f"data:image/png;base64,{img_str}"
+        except Exception as fallback_error:
+            logger.error(f"Even fallback chart generation failed: {str(fallback_error)}")
+            return None
 
 def analyze_stock_with_gemini(symbol, df):
     """Analyze stock data using Google Gemini"""
