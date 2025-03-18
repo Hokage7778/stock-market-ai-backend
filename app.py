@@ -64,13 +64,17 @@ CORS(app,
      })
 
 # Get API keys from environment variables or use fallback for development
-GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
+GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY') or os.getenv('GEMINI_API_KEY')
 
 # Configure Google Gemini API
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
-else:
-    logger.error("GEMINI_API_KEY not set in environment variables")
+try:
+    if GEMINI_API_KEY:
+        logger.info("Configuring Gemini API with key")
+        genai.configure(api_key=GEMINI_API_KEY)
+    else:
+        logger.error("GEMINI_API_KEY not set in environment variables")
+except Exception as gemini_config_error:
+    logger.error(f"Error configuring Gemini: {str(gemini_config_error)}")
 
 @app.route('/health', methods=['GET'])
 def health_check():
@@ -422,16 +426,74 @@ def analyze_stock_with_gemini(symbol, df):
         Keep your analysis concise but thorough, with approximately 300-400 words.
         """
         
-        # Generate content with Gemini
-        model = genai.GenerativeModel('gemini-pro')
-        response = model.generate_content(prompt)
-        
-        return response.text
-        
+        try:
+            # Try with gemini-pro model (default)
+            model = genai.GenerativeModel('gemini-pro')
+            response = model.generate_content(prompt)
+            return response.text
+        except Exception as model_error:
+            logger.error(f"Error with gemini-pro model: {str(model_error)}")
+            
+            try:
+                # Fallback to gemini-1.5-pro model
+                model = genai.GenerativeModel('gemini-1.5-pro-latest')
+                response = model.generate_content(prompt)
+                return response.text
+            except Exception as fallback_error:
+                logger.error(f"Error with fallback model: {str(fallback_error)}")
+                
+                # Final fallback to any available model
+                try:
+                    # Get available models
+                    models = genai.list_models()
+                    available_models = [m.name for m in models if 'generateContent' in m.supported_generation_methods]
+                    
+                    if available_models:
+                        logger.info(f"Trying available model: {available_models[0]}")
+                        model = genai.GenerativeModel(available_models[0])
+                        response = model.generate_content(prompt)
+                        return response.text
+                    else:
+                        return "No suitable AI models available. Unable to perform analysis."
+                except Exception as final_error:
+                    logger.error(f"Final model attempt failed: {str(final_error)}")
+                    return f"AI analysis unavailable: {str(final_error)}"
+                
     except Exception as e:
         logger.error(f"Error analyzing stock: {str(e)}")
         logger.error(traceback.format_exc())
-        return f"Error performing analysis: {str(e)}"
+        
+        # Provide a basic analysis when AI fails
+        try:
+            current_price = latest_data['close'] if 'latest_data' in locals() else "unknown"
+            ma20 = latest_data['MA20'] if 'latest_data' in locals() and 'MA20' in latest_data else "unknown"
+            ma50 = latest_data['MA50'] if 'latest_data' in locals() and 'MA50' in latest_data else "unknown"
+            
+            basic_analysis = f"""
+            # Basic Stock Analysis for {symbol}
+            
+            ## Current Status
+            - Current Price: {current_price_formatted if 'current_price_formatted' in locals() else "Unknown"}
+            - Period Price Change: {price_change_formatted if 'price_change_formatted' in locals() else "Unknown"}
+            
+            ## Technical Indicators
+            - 20-day Moving Average: {ma20_formatted if 'ma20_formatted' in locals() else "Unknown"}
+            - 50-day Moving Average: {ma50_formatted if 'ma50_formatted' in locals() else "Unknown"}
+            - RSI (14-day): {rsi_formatted if 'rsi_formatted' in locals() else "Unknown"}
+            
+            ## Basic Interpretation
+            This is a fallback analysis since the AI service is currently unavailable.
+            
+            The stock appears to be {'above' if current_price > ma20 else 'below'} its 20-day moving average
+            and {'above' if current_price > ma50 else 'below'} its 50-day moving average.
+            
+            Please check back later for a more comprehensive AI-powered analysis.
+            """
+            
+            return basic_analysis
+        except Exception as basic_error:
+            logger.error(f"Even basic analysis failed: {str(basic_error)}")
+            return f"Error performing analysis: {str(e)}"
 
 @app.route('/api/stock-data', methods=['GET'])
 def get_stock_data():
