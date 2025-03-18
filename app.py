@@ -15,7 +15,13 @@ from io import BytesIO
 import numpy as np
 import logging
 import traceback
+from dotenv import load_dotenv
 import yfinance as yf
+import warnings
+
+# Suppress yfinance warnings
+warnings.filterwarnings("ignore", category=FutureWarning)
+yf.pdr_override()
 
 # Configure logging
 logging.basicConfig(
@@ -75,12 +81,43 @@ def health_check():
 def fetch_stock_data(symbol):
     """Fetch stock data using yfinance"""
     try:
-        # Get historical data for last 100 days
+        logger.info(f"Fetching data for {symbol} using yfinance")
+        
+        # Remove $ prefix if present (yfinance doesn't accept $ in ticker symbols)
+        if symbol.startswith('$'):
+            symbol = symbol[1:]
+        
+        # Try with direct ticker first
         ticker = yf.Ticker(symbol)
         df = ticker.history(period="3mo")
         
+        # If no data returned, try with .{exchange} suffixes
         if df.empty:
-            logger.error(f"No data returned from yfinance for {symbol}")
+            logger.warning(f"No data returned for {symbol}, trying alternative formats")
+            
+            # Common exchanges to try
+            exchanges = ["", ".NS", ".BO", ".L", ".PA", ".DE", ".TO"]
+            
+            for exchange in exchanges:
+                try:
+                    alternate_symbol = f"{symbol}{exchange}"
+                    logger.debug(f"Trying alternate symbol: {alternate_symbol}")
+                    ticker = yf.Ticker(alternate_symbol)
+                    df = ticker.history(period="3mo")
+                    if not df.empty:
+                        logger.info(f"Found data using alternate symbol: {alternate_symbol}")
+                        break
+                except Exception as ex:
+                    logger.debug(f"Failed with {alternate_symbol}: {str(ex)}")
+                    continue
+        
+        # If still no data, try downloading directly
+        if df.empty:
+            logger.warning(f"Still no data for {symbol}, trying yf.download directly")
+            df = yf.download(symbol, period="3mo")
+        
+        if df.empty:
+            logger.error(f"No data returned from yfinance for {symbol} after all attempts")
             return None, {'error': f"No data available for symbol {symbol}"}
         
         # Rename columns for consistency with the rest of the code
@@ -264,33 +301,39 @@ def analyze_stock_with_gemini(symbol, df):
 @app.route('/api/stock-data', methods=['GET'])
 def get_stock_data():
     """Get stock data for a given symbol"""
-    symbol = request.args.get('symbol', 'AAPL')
-    
-    if not symbol:
-        return jsonify({'error': 'Stock symbol is required'}), 400
+    try:
+        symbol = request.args.get('symbol', 'AAPL')
         
-    df, error = fetch_stock_data(symbol)
-    
-    if error:
-        logger.error(f"Error fetching data for {symbol}: {error}")
-        return jsonify(error), 500
+        if not symbol:
+            return jsonify({'error': 'Stock symbol is required'}), 400
+            
+        logger.info(f"Processing request for symbol: {symbol}")
+        df, error = fetch_stock_data(symbol)
         
-    if df is None:
-        return jsonify({'error': f'No data found for symbol {symbol}'}), 404
-    
-    # Create candlestick chart
-    chart_image = create_candlestick_chart(df, symbol)
-    
-    if not chart_image:
-        return jsonify({'error': 'Failed to create chart'}), 500
-    
-    # Prepare data for response
-    logger.debug(f"Successfully processed data for {symbol}")
-    return jsonify({
-        'symbol': symbol,
-        'chart': chart_image,
-        'data': json.loads(df.head(10).to_json(orient='records', date_format='iso'))
-    })
+        if error:
+            logger.error(f"Error fetching data for {symbol}: {error}")
+            return jsonify(error), 500
+            
+        if df is None or df.empty:
+            return jsonify({'error': f'No data found for symbol {symbol}'}), 404
+        
+        # Create candlestick chart
+        chart_image = create_candlestick_chart(df, symbol)
+        
+        if not chart_image:
+            return jsonify({'error': 'Failed to create chart'}), 500
+        
+        # Prepare data for response
+        logger.debug(f"Successfully processed data for {symbol}")
+        return jsonify({
+            'symbol': symbol,
+            'chart': chart_image,
+            'data': json.loads(df.head(10).to_json(orient='records', date_format='iso'))
+        })
+    except Exception as e:
+        logger.error(f"Unexpected error in get_stock_data: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': f'Server error: {str(e)}'}), 500
 
 @app.route('/api/analyze', methods=['POST'])
 def analyze_stock():
