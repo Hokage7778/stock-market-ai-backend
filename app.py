@@ -21,7 +21,6 @@ import warnings
 
 # Suppress yfinance warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
-yf.pdr_override()
 
 # Configure logging
 logging.basicConfig(
