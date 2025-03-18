@@ -27,13 +27,35 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 app = Flask(__name__)
-CORS(app, resources={
-    r"/api/*": {
-        "origins": ["http://localhost:3000", "https://your-frontend-domain.vercel.app"],
-        "methods": ["GET", "POST", "OPTIONS"],
-        "allow_headers": ["Content-Type"]
-    }
-})
+
+# Updated CORS configuration
+CORS(app, 
+     resources={
+         r"/*": {  # Allow all routes
+             "origins": [
+                 "https://stockmarketai.netlify.app",
+                 "http://localhost:3000",
+                 "https://www.stockmarketai.netlify.app",
+                 "http://stockmarketai.netlify.app"
+             ],
+             "methods": ["GET", "POST", "OPTIONS", "HEAD"],
+             "allow_headers": [
+                 "Content-Type", 
+                 "Authorization", 
+                 "Access-Control-Allow-Headers",
+                 "Access-Control-Allow-Origin",
+                 "Access-Control-Allow-Methods",
+                 "Accept",
+                 "Origin"
+             ],
+             "expose_headers": [
+                 "Content-Type",
+                 "Authorization"
+             ],
+             "supports_credentials": True,
+             "max_age": 86400  # Cache preflight requests for 24 hours
+         }
+     })
 
 # API Keys
 ALPHA_VANTAGE_API_KEY = os.environ.get("ALPHA_VANTAGE_API_KEY")
@@ -69,17 +91,25 @@ def fetch_stock_data(symbol, interval='daily', outputsize='compact'):
         # Print the response for debugging
         logger.debug(f"API Response keys: {data.keys()}")
         
-        # Check for error messages
-        if 'Error Message' in data:
-            error_msg = data['Error Message']
-            logger.error(f"Alpha Vantage error for {symbol}: {error_msg}")
-            return None, error_msg
+        # Check for API rate limit message
+        if 'Information' in data and 'rate limit' in data['Information'].lower():
+            logger.warning(f"Alpha Vantage rate limit reached: {data['Information']}")
+            return None, {
+                'error': 'API rate limit reached. Please try again later or contact support for premium access.',
+                'details': data['Information']
+            }
         
-        # Check for information messages (like API limit reached)
-        if 'Information' in data:
-            info_msg = data['Information']
-            logger.warning(f"Alpha Vantage information for {symbol}: {info_msg}")
-            return None, info_msg
+        if 'Error Message' in data:
+            logger.error(f"Alpha Vantage error for {symbol}: {data['Error Message']}")
+            return None, {'error': data['Error Message']}
+        
+        if 'Note' in data:
+            logger.warning(f"Alpha Vantage note for {symbol}: {data['Note']}")
+            return None, {'error': data['Note']}
+        
+        if 'Time Series (Daily)' not in data:
+            logger.error(f"Unexpected API response for {symbol}: {data}")
+            return None, {'error': 'Invalid API response format'}
         
         # Extract time series data
         time_series_key = f'Time Series ({interval})' if interval != 'daily' else 'Time Series (Daily)'
@@ -322,7 +352,7 @@ def get_stock_data():
         
         if error:
             logger.error(f"Error fetching data for {symbol}: {error}")
-            return jsonify({'error': error}), 500
+            return jsonify(error), 500
             
         if df is None:
             logger.error(f"No data returned for symbol: {symbol}")
